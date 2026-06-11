@@ -24,6 +24,14 @@ or with portable:
 
 `python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-Hunyuan3DWrapper\requirements.txt`
 
+## Intel GPU / XPU support
+
+The nodes use ComfyUI's active torch device instead of assuming CUDA. If your ComfyUI environment is running a PyTorch build with Intel XPU support, model loading, sampling, VAE decode, and diffusers texture models will use that active XPU device where the underlying PyTorch/diffusers ops support it.
+
+Texture rendering and baking no longer require the CUDA rasterizer on non-CUDA systems. When CUDA or `custom_rasterizer` is unavailable, the wrapper falls back to a portable CPU PyTorch rasterizer for normal/depth/position rendering and texture baking. This path is meant for compatibility and is expected to be slower than the CUDA extension, especially at large render or texture sizes.
+
+CUDA-only acceleration options such as cudagraphs, cublas ops, nvdiffrast, and diffusers CUDA CPU-offload are ignored or replaced with portable behavior when the active device is not CUDA.
+
 
 For the texturegen part compilation is needed, I have included my compilations as a wheel for the rasterizer, and compiled .pyd for the mesh_processor (already in place), these are compiled for:
 

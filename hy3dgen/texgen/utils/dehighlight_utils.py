@@ -27,23 +27,25 @@ import numpy as np
 import torch
 from PIL import Image
 from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
+from ...device_utils import make_generator, select_dtype
 
 
 class Light_Shadow_Remover():
     def __init__(self, model_path, device):
         self.device = device
+        self.dtype = select_dtype(device)
         self.cfg_image = 1.5
         self.cfg_text = 1.0
 
         pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,
+            torch_dtype=self.dtype,
             safety_checker=None,
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config)
         pipeline.set_progress_bar_config(disable=True)
 
-        self.pipeline = pipeline.to(self.device, torch.float16)
+        self.pipeline = pipeline.to(self.device, self.dtype)
 
     @torch.no_grad()
     def __call__(self, image):
@@ -73,7 +75,7 @@ class Light_Shadow_Remover():
         image = self.pipeline(
             prompt="",
             image=image,
-            generator=torch.manual_seed(42),
+            generator=make_generator(self.device, 42),
             height=512,
             width=512,
             num_inference_steps=50,

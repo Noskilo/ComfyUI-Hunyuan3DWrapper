@@ -23,6 +23,7 @@ import trimesh
 from .models.autoencoders import Latent2MeshOutput
 
 import folder_paths
+from ..device_utils import select_dtype
 
 
 def load_mesh(path):
@@ -169,16 +170,23 @@ def bpt_remesh(self, mesh: trimesh.Trimesh, verbose: bool = False, with_normal: 
 
         add_safe_globals([LossScaler, fragment_address, ZeroStageEnum])
 
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            device = torch.device("xpu")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        dtype = select_dtype(device)
+
         model = MeshTransformer()
 
         comfyui_dir = os.path.dirname(os.path.abspath(__file__)) 
         model_path = os.path.join(comfyui_dir, 'bpt/bpt-8-16-500m.pt')
         print(model_path)
         model.load(model_path)
-        model = model.eval().cuda().half()
+        model = model.eval().to(device=device, dtype=dtype)
 
-        import torch
-        pc_tensor = torch.from_numpy(pc_normal).cuda().half()
+        pc_tensor = torch.from_numpy(pc_normal).to(device=device, dtype=dtype)
         if len(pc_tensor.shape) == 2:
             pc_tensor = pc_tensor.unsqueeze(0)
 

@@ -281,7 +281,7 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
-        return latents.to(torch.float16), timesteps
+        return latents.to(dtype=dtype), timesteps
     
     def denoise(
         self,

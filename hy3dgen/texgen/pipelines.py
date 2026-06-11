@@ -34,6 +34,7 @@ from .differentiable_renderer.mesh_render import MeshRender
 from .utils.dehighlight_utils import Light_Shadow_Remover
 from .utils.multiview_utils import Multiview_Diffusion_Net
 from .utils.uv_warp_utils import mesh_uv_wrap
+from ..device_utils import safe_empty_cache, select_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,13 @@ logger = logging.getLogger(__name__)
 class Hunyuan3DTexGenConfig:
 
     def __init__(self, light_remover_ckpt_path, multiview_ckpt_path):
-        self.device = 'cuda'
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            self.device = torch.device("xpu")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+        self.dtype = select_dtype(self.device)
         self.light_remover_ckpt_path = light_remover_ckpt_path
         self.multiview_ckpt_path = multiview_ckpt_path
 
@@ -86,13 +93,13 @@ class Hunyuan3DPaintPipeline:
         self.models = {}
         self.render = MeshRender(
             default_resolution=self.config.render_size,
-            texture_size=self.config.texture_size)
+            texture_size=self.config.texture_size,
+            device=self.config.device)
 
         self.load_models()
 
     def load_models(self):
-        # empty cude cache
-        torch.cuda.empty_cache()
+        safe_empty_cache(self.config.device)
         # Load model
         self.models['delight_model'] = Light_Shadow_Remover(self.config)
         self.models['multiview_model'] = Multiview_Diffusion_Net(self.config)

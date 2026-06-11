@@ -37,6 +37,7 @@ from .camera_utils import (
 )
 from .mesh_processor import meshVerticeInpaint
 from .mesh_utils import load_mesh, save_mesh
+from ...device_utils import as_torch_device
 
 
 def stride_from_shape(shape):
@@ -135,7 +136,9 @@ class MeshRender():
         use_antialias=True, max_mip_level=None, filter_mode='linear',
         bake_mode='linear', raster_mode='cr', device='cuda', ortho_scale=1.2,):
 
-        self.device = device
+        requested_device = as_torch_device(device)
+        cuda_available = requested_device.type == 'cuda' and torch.cuda.is_available()
+        self.device = requested_device if cuda_available else torch.device('cpu')
 
         self.set_default_render_resolution(default_resolution)
         self.set_default_texture_resolution(texture_size)
@@ -154,11 +157,19 @@ class MeshRender():
         self.tex = None
 
         self.raster_mode = raster_mode
-        if self.raster_mode == 'cr':
-            import custom_rasterizer as cr
-            self.raster = cr
-        else:
-            raise f'No raster named {self.raster_mode}'
+        self.raster = None
+        if self.raster_mode == 'cr' and cuda_available:
+            try:
+                import custom_rasterizer as cr
+                self.raster = cr
+            except ImportError:
+                print("custom_rasterizer not found, falling back to CPU torch rasterizer")
+                self.raster_mode = 'torch'
+                self.device = torch.device('cpu')
+        elif self.raster_mode == 'cr':
+            self.raster_mode = 'torch'
+        if self.raster_mode != 'cr' and self.raster_mode != 'torch':
+            raise ValueError(f'No raster named {self.raster_mode}')
 
         if camera_type == 'orth':
             self.ortho_scale = ortho_scale
@@ -184,10 +195,77 @@ class MeshRender():
             findices, barycentric = self.raster.rasterize(pos, tri, resolution)
             rast_out = torch.cat((barycentric, findices.unsqueeze(-1)), dim=-1)
             rast_out = rast_out.unsqueeze(0)
+        elif self.raster_mode == 'torch':
+            rast_out_db = None
+            findices, barycentric = self._torch_rasterize(pos, tri, resolution)
+            rast_out = torch.cat((barycentric, findices.unsqueeze(-1)), dim=-1)
+            rast_out = rast_out.unsqueeze(0)
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise ValueError(f'No raster named {self.raster_mode}')
 
         return rast_out, rast_out_db
+
+    def _torch_rasterize(self, pos, tri, resolution):
+        if pos.dim() == 3:
+            pos = pos[0]
+        if isinstance(resolution, (int, float)):
+            resolution = [int(resolution), int(resolution)]
+        height, width = int(resolution[0]), int(resolution[1])
+
+        pos = pos.detach().to('cpu', dtype=torch.float32)
+        tri = tri.detach().to('cpu', dtype=torch.long)
+
+        w = pos[:, 3:4]
+        w = torch.where(w.abs() < 1e-8, torch.full_like(w, 1e-8), w)
+        ndc = pos[:, :3] / w
+        screen = torch.empty((pos.shape[0], 3), dtype=torch.float32)
+        screen[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * (width - 1)
+        screen[:, 1] = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * (height - 1)
+        screen[:, 2] = ndc[:, 2]
+
+        findices = torch.zeros((height, width), dtype=torch.float32)
+        barycentric = torch.zeros((height, width, 3), dtype=torch.float32)
+        depth = torch.full((height, width), float('inf'), dtype=torch.float32)
+
+        for face_index, face in enumerate(tri):
+            pts = screen[face]
+            x0, y0, z0 = pts[0]
+            x1, y1, z1 = pts[1]
+            x2, y2, z2 = pts[2]
+
+            denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+            if torch.abs(denom) < 1e-12:
+                continue
+
+            xmin = max(int(torch.floor(torch.min(pts[:, 0])).item()), 0)
+            xmax = min(int(torch.ceil(torch.max(pts[:, 0])).item()), width - 1)
+            ymin = max(int(torch.floor(torch.min(pts[:, 1])).item()), 0)
+            ymax = min(int(torch.ceil(torch.max(pts[:, 1])).item()), height - 1)
+            if xmax < xmin or ymax < ymin:
+                continue
+
+            ys = torch.arange(ymin, ymax + 1, dtype=torch.float32)
+            xs = torch.arange(xmin, xmax + 1, dtype=torch.float32)
+            yy, xx = torch.meshgrid(ys + 0.5, xs + 0.5, indexing='ij')
+
+            a = ((y1 - y2) * (xx - x2) + (x2 - x1) * (yy - y2)) / denom
+            b = ((y2 - y0) * (xx - x2) + (x0 - x2) * (yy - y2)) / denom
+            c = 1.0 - a - b
+            inside = (a >= -1e-6) & (b >= -1e-6) & (c >= -1e-6)
+            face_depth = a * z0 + b * z1 + c * z2
+
+            depth_view = depth[ymin:ymax + 1, xmin:xmax + 1]
+            update = inside & (face_depth < depth_view)
+            if not torch.any(update):
+                continue
+
+            depth_view[update] = face_depth[update]
+            findices_view = findices[ymin:ymax + 1, xmin:xmax + 1]
+            bary_view = barycentric[ymin:ymax + 1, xmin:xmax + 1]
+            findices_view[update] = float(face_index + 1)
+            bary_view[update] = torch.stack((a, b, c), dim=-1)[update]
+
+        return findices.to(self.device), barycentric.to(self.device)
 
     def raster_interpolate(self, uv, rast_out, uv_idx, rast_db=None, diff_attrs=None):
 
@@ -198,8 +276,19 @@ class MeshRender():
             if uv.dim() == 2:
                 uv = uv.unsqueeze(0)
             textc = self.raster.interpolate(uv, findices, barycentric, uv_idx)
+        elif self.raster_mode == 'torch':
+            textd = None
+            barycentric = rast_out[0, ..., :-1]
+            findices = rast_out[0, ..., -1]
+            if uv.dim() == 2:
+                uv = uv.unsqueeze(0)
+            f = findices.long() - 1
+            f = torch.clamp(f, min=0)
+            vcol = uv[0, uv_idx.long()[f]]
+            textc = (barycentric.unsqueeze(-1) * vcol).sum(dim=-2)
+            textc = textc.unsqueeze(0)
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise ValueError(f'No raster named {self.raster_mode}')
 
         return textc, textd
 
@@ -312,7 +401,13 @@ class MeshRender():
         return self.tex.cpu().numpy()
 
     def to(self, device):
-        self.device = device
+        requested_device = as_torch_device(device)
+        cuda_available = requested_device.type == 'cuda' and torch.cuda.is_available()
+        if self.raster_mode == 'cr' and cuda_available:
+            self.device = requested_device
+        else:
+            self.raster_mode = 'torch'
+            self.device = torch.device('cpu')
 
         for attr_name in dir(self):
             attr_value = getattr(self, attr_name)

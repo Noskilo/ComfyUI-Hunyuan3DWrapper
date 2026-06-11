@@ -3,6 +3,7 @@ import torch
 import logging
 import numpy as np
 import trimesh
+from .hy3dgen.device_utils import memory_stats
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 
@@ -16,9 +17,16 @@ def check_diffusers_version():
         raise AssertionError("diffusers is not installed.")
 
 def print_memory(device):
-    memory = torch.cuda.memory_allocated(device) / 1024**3
-    max_memory = torch.cuda.max_memory_allocated(device) / 1024**3
-    max_reserved = torch.cuda.max_memory_reserved(device) / 1024**3
+    stats = memory_stats(device)
+    if stats is None:
+        log.info(f"Memory stats are not available for device={device}")
+        return
+    memory = stats.get("allocated")
+    max_memory = stats.get("max_allocated")
+    max_reserved = stats.get("max_reserved")
+    if memory is None or max_memory is None or max_reserved is None:
+        log.info(f"Memory stats are not available for device={device}")
+        return
     log.info(f"Allocated memory: {memory=:.3f} GB")
     log.info(f"Max allocated memory: {max_memory=:.3f} GB")
     log.info(f"Max reserved memory: {max_reserved=:.3f} GB")
@@ -64,8 +72,9 @@ def intrinsics_to_projection(
     ret[3, 2] = 1.
     return ret
 
-def yaw_pitch_r_fov_to_extrinsics_intrinsics(yaws, pitchs, rs, fovs, aspect_ratio=1.0, pan_x=0.0, pan_y=0.0):
+def yaw_pitch_r_fov_to_extrinsics_intrinsics(yaws, pitchs, rs, fovs, aspect_ratio=1.0, pan_x=0.0, pan_y=0.0, device=None):
     import utils3d
+    device = torch.device("cpu") if device is None else torch.device(device)
     is_list = isinstance(yaws, list)
     if not is_list:
         yaws = [yaws]
@@ -81,36 +90,36 @@ def yaw_pitch_r_fov_to_extrinsics_intrinsics(yaws, pitchs, rs, fovs, aspect_rati
     extrinsics = []
     intrinsics = []
     for yaw, pitch, r, fov in zip(yaws, pitchs, rs, fovs):
-        fov = torch.deg2rad(torch.tensor(float(fov))).cuda()
+        fov = torch.deg2rad(torch.tensor(float(fov), device=device))
         fov_y = fov
         fov_x = 2.0 * torch.atan(torch.tan(fov_y * 0.5) * aspect_ratio)
         
-        yaw = torch.tensor(float(yaw)).cuda()
-        pitch = torch.tensor(float(pitch)).cuda()
-        orig = torch.tensor([
+        yaw = torch.tensor(float(yaw), device=device)
+        pitch = torch.tensor(float(pitch), device=device)
+        orig = torch.stack([
             torch.sin(yaw) * torch.cos(pitch),
             torch.cos(yaw) * torch.cos(pitch),
             torch.sin(pitch),
-        ]).cuda() * r
+        ]) * r
 
         # Calculate camera right vector
-        right = torch.tensor([
+        right = torch.stack([
             torch.cos(yaw),
             -torch.sin(yaw),
-            0.0
-        ]).cuda()
+            torch.zeros_like(yaw)
+        ])
 
         # Calculate camera up vector after pitch
-        up = torch.tensor([
+        up = torch.stack([
             torch.sin(yaw) * torch.sin(pitch),
             torch.cos(yaw) * torch.sin(pitch),
             -torch.cos(pitch)
-        ]).cuda()
+        ])
 
         # Apply panning in camera space
-        target = torch.tensor([0.0, 0.0, 0.0]).float().cuda()
+        target = torch.tensor([0.0, 0.0, 0.0], device=device).float()
         target = target + right * pan_x + up * pan_y
-        up_vector = torch.tensor([0, 0, 1]).float().cuda()
+        up_vector = torch.tensor([0, 0, 1], device=device).float()
 
         extr = utils3d.torch.extrinsics_look_at(orig, target, up_vector)
         intr = utils3d.torch.intrinsics_from_fov_xy(fov_x, fov_y)
