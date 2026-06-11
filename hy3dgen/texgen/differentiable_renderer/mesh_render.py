@@ -184,7 +184,7 @@ class MeshRender():
                 0.01, 100.0
             )
         else:
-            raise f'No camera type {camera_type}'
+            raise ValueError(f'No camera type {camera_type}')
 
     def raster_rasterize(self, pos, tri, resolution, ranges=None, grad_db=True):
 
@@ -296,19 +296,19 @@ class MeshRender():
                        boundary_mode='wrap', max_mip_level=None):
 
         if self.raster_mode == 'cr':
-            raise f'Texture is not implemented in cr'
+            raise NotImplementedError('Texture is not implemented in cr')
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise ValueError(f'No raster named {self.raster_mode}')
 
         return color
 
     def raster_antialias(self, color, rast, pos, tri, topology_hash=None, pos_gradient_boost=1.0):
 
-        if self.raster_mode == 'cr':
+        if self.raster_mode in ('cr', 'torch'):
             # Antialias has not been supported yet
             color = color
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise ValueError(f'No raster named {self.raster_mode}')
 
         return color
 
@@ -866,7 +866,7 @@ class MeshRender():
             boundary_map = linear_grid_put_2d(
                 self.texture_size[1], self.texture_size[0], uv[..., [1, 0]], sketch_image)
         else:
-            raise f'No bake mode {method}'
+            raise ValueError(f'No bake mode {method}')
 
         return texture, cos_map, boundary_map
 
