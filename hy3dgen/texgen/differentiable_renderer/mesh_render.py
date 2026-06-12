@@ -220,7 +220,7 @@ class MeshRender():
         ndc = pos[:, :3] / w
         screen = torch.empty((pos.shape[0], 3), dtype=torch.float32)
         screen[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * (width - 1)
-        screen[:, 1] = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * (height - 1)
+        screen[:, 1] = (ndc[:, 1] * 0.5 + 0.5) * (height - 1)
         screen[:, 2] = ndc[:, 2]
 
         findices = torch.zeros((height, width), dtype=torch.float32)
