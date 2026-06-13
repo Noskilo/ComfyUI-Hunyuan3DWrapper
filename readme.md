@@ -28,7 +28,7 @@ or with portable:
 
 The nodes use ComfyUI's active torch device instead of assuming CUDA. If your ComfyUI environment is running a PyTorch build with Intel XPU support, model loading, sampling, VAE decode, and diffusers texture models will use that active XPU device where the underlying PyTorch/diffusers ops support it.
 
-Texture rendering and baking no longer require the CUDA rasterizer on non-CUDA systems. When CUDA or `custom_rasterizer` is unavailable, the wrapper falls back to a portable CPU PyTorch rasterizer for normal/depth/position rendering and texture baking. This path is meant for compatibility and is expected to be slower than the CUDA extension, especially at large render or texture sizes.
+Texture rendering and baking no longer require the CUDA rasterizer on non-CUDA systems. When CUDA or `custom_rasterizer` is unavailable, the wrapper falls back to a portable PyTorch rasterizer for normal/depth/position rendering and texture baking. If the active torch device is Intel XPU, the rasterizer runs a tiled tensor path on the GPU; otherwise it falls back to CPU. This path is still expected to be slower than the CUDA extension at large render or texture sizes.
 
 CUDA-only acceleration options such as cudagraphs, cublas ops, nvdiffrast, and diffusers CUDA CPU-offload are ignored or replaced with portable behavior when the active device is not CUDA.
 

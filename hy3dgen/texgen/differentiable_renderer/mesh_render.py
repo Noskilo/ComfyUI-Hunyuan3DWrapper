@@ -128,6 +128,19 @@ def linear_grid_put_2d(H, W, coords, values, return_count=False):
     return result
 
 
+def torch_device_available(device):
+    device = as_torch_device(device)
+    if device.type == 'cpu':
+        return True
+    if device.type == 'cuda':
+        return torch.cuda.is_available()
+    if device.type == 'xpu' and hasattr(torch, 'xpu'):
+        return torch.xpu.is_available()
+    if device.type == 'mps' and hasattr(torch.backends, 'mps'):
+        return torch.backends.mps.is_available()
+    return False
+
+
 class MeshRender():
     def __init__(
         self,
@@ -138,7 +151,8 @@ class MeshRender():
 
         requested_device = as_torch_device(device)
         cuda_available = requested_device.type == 'cuda' and torch.cuda.is_available()
-        self.device = requested_device if cuda_available else torch.device('cpu')
+        accelerator_available = torch_device_available(requested_device)
+        self.device = requested_device if accelerator_available else torch.device('cpu')
 
         self.set_default_render_resolution(default_resolution)
         self.set_default_texture_resolution(texture_size)
@@ -163,9 +177,8 @@ class MeshRender():
                 import custom_rasterizer as cr
                 self.raster = cr
             except ImportError:
-                print("custom_rasterizer not found, falling back to CPU torch rasterizer")
+                print("custom_rasterizer not found, falling back to torch rasterizer")
                 self.raster_mode = 'torch'
-                self.device = torch.device('cpu')
         elif self.raster_mode == 'cr':
             self.raster_mode = 'torch'
         if self.raster_mode != 'cr' and self.raster_mode != 'torch':
@@ -206,11 +219,17 @@ class MeshRender():
         return rast_out, rast_out_db
 
     def _torch_rasterize(self, pos, tri, resolution):
-        if pos.dim() == 3:
-            pos = pos[0]
         if isinstance(resolution, (int, float)):
             resolution = [int(resolution), int(resolution)]
         height, width = int(resolution[0]), int(resolution[1])
+        if self.device.type != 'cpu':
+            return self._torch_rasterize_tiled(pos, tri, height, width)
+
+        return self._torch_rasterize_cpu(pos, tri, height, width)
+
+    def _torch_rasterize_cpu(self, pos, tri, height, width):
+        if pos.dim() == 3:
+            pos = pos[0]
 
         pos = pos.detach().to('cpu', dtype=torch.float32)
         tri = tri.detach().to('cpu', dtype=torch.long)
@@ -267,6 +286,104 @@ class MeshRender():
 
         return findices.to(self.device), barycentric.to(self.device)
 
+    def _torch_rasterize_tiled(self, pos, tri, height, width, tile_size=64, face_chunk_size=512):
+        if pos.dim() == 3:
+            pos = pos[0]
+
+        device = self.device
+        pos = pos.detach().to(device, dtype=torch.float32)
+        tri = tri.detach().to(device, dtype=torch.long)
+
+        w = pos[:, 3:4]
+        w = torch.where(w.abs() < 1e-8, torch.full_like(w, 1e-8), w)
+        ndc = pos[:, :3] / w
+        screen = torch.empty((pos.shape[0], 3), dtype=torch.float32, device=device)
+        screen[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * (width - 1)
+        screen[:, 1] = (ndc[:, 1] * 0.5 + 0.5) * (height - 1)
+        screen[:, 2] = ndc[:, 2]
+
+        tri_screen = screen[tri[:, :3]]
+        face_min = torch.floor(tri_screen[..., :2].amin(dim=1)).long()
+        face_max = torch.ceil(tri_screen[..., :2].amax(dim=1)).long()
+        valid_bbox = (
+            (face_max[:, 0] >= 0)
+            & (face_max[:, 1] >= 0)
+            & (face_min[:, 0] <= width - 1)
+            & (face_min[:, 1] <= height - 1)
+        )
+
+        findices = torch.zeros((height, width), dtype=torch.float32, device=device)
+        barycentric = torch.zeros((height, width, 3), dtype=torch.float32, device=device)
+
+        for ymin in range(0, height, tile_size):
+            ymax = min(ymin + tile_size, height)
+            for xmin in range(0, width, tile_size):
+                xmax = min(xmin + tile_size, width)
+                overlaps = (
+                    valid_bbox
+                    & (face_max[:, 0] >= xmin)
+                    & (face_min[:, 0] <= xmax - 1)
+                    & (face_max[:, 1] >= ymin)
+                    & (face_min[:, 1] <= ymax - 1)
+                )
+                face_ids = torch.nonzero(overlaps, as_tuple=False).flatten()
+                if face_ids.numel() == 0:
+                    continue
+
+                ys = torch.arange(ymin, ymax, dtype=torch.float32, device=device) + 0.5
+                xs = torch.arange(xmin, xmax, dtype=torch.float32, device=device) + 0.5
+                yy, xx = torch.meshgrid(ys, xs, indexing='ij')
+                pixel_x = xx.reshape(-1, 1)
+                pixel_y = yy.reshape(-1, 1)
+                pixel_count = pixel_x.shape[0]
+
+                best_depth = torch.full((pixel_count,), float('inf'), dtype=torch.float32, device=device)
+                best_face = torch.zeros((pixel_count,), dtype=torch.long, device=device)
+                best_bary = torch.zeros((pixel_count, 3), dtype=torch.float32, device=device)
+
+                for start in range(0, face_ids.numel(), face_chunk_size):
+                    chunk_face_ids = face_ids[start:start + face_chunk_size]
+                    pts = tri_screen[chunk_face_ids]
+                    x0, y0, z0 = pts[:, 0, 0], pts[:, 0, 1], pts[:, 0, 2]
+                    x1, y1, z1 = pts[:, 1, 0], pts[:, 1, 1], pts[:, 1, 2]
+                    x2, y2, z2 = pts[:, 2, 0], pts[:, 2, 1], pts[:, 2, 2]
+
+                    denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+                    valid = denom.abs() >= 1e-12
+                    denom = torch.where(valid, denom, torch.ones_like(denom))
+
+                    a = ((y1 - y2) * (pixel_x - x2) + (x2 - x1) * (pixel_y - y2)) / denom
+                    b = ((y2 - y0) * (pixel_x - x2) + (x0 - x2) * (pixel_y - y2)) / denom
+                    c = 1.0 - a - b
+                    inside = (a >= -1e-6) & (b >= -1e-6) & (c >= -1e-6) & valid.unsqueeze(0)
+                    depth = a * z0 + b * z1 + c * z2
+                    depth = torch.where(inside, depth, torch.full_like(depth, float('inf')))
+
+                    chunk_depth, chunk_best = depth.min(dim=1)
+                    update = chunk_depth < best_depth
+                    if not torch.any(update):
+                        continue
+
+                    rows = torch.nonzero(update, as_tuple=False).flatten()
+                    selected = chunk_best[rows]
+                    best_depth[rows] = chunk_depth[rows]
+                    best_face[rows] = chunk_face_ids[selected] + 1
+                    best_bary[rows, 0] = a[rows, selected]
+                    best_bary[rows, 1] = b[rows, selected]
+                    best_bary[rows, 2] = c[rows, selected]
+
+                tile_mask = best_face > 0
+                if not torch.any(tile_mask):
+                    continue
+
+                tile_mask = tile_mask.reshape(ymax - ymin, xmax - xmin)
+                tile_findices = findices[ymin:ymax, xmin:xmax]
+                tile_barycentric = barycentric[ymin:ymax, xmin:xmax]
+                tile_findices[tile_mask] = best_face.reshape(ymax - ymin, xmax - xmin)[tile_mask].float()
+                tile_barycentric[tile_mask] = best_bary.reshape(ymax - ymin, xmax - xmin, 3)[tile_mask]
+
+        return findices, barycentric
+
     def raster_interpolate(self, uv, rast_out, uv_idx, rast_db=None, diff_attrs=None):
 
         if self.raster_mode == 'cr':
@@ -311,6 +428,23 @@ class MeshRender():
             raise ValueError(f'No raster named {self.raster_mode}')
 
         return color
+
+    def _mean_vertex_normals(self, face_normals):
+        if self.device.type == 'cpu':
+            vertex_normals = trimesh.geometry.mean_vertex_normals(vertex_count=self.vtx_pos.shape[0],
+                                                                  faces=self.pos_idx.cpu(),
+                                                                  face_normals=face_normals.cpu(), )
+            return torch.from_numpy(vertex_normals).float().to(self.device).contiguous()
+
+        vertex_normals = torch.zeros(
+            (self.vtx_pos.shape[0], 3),
+            dtype=face_normals.dtype,
+            device=self.device,
+        )
+        indices = self.pos_idx[:, :3].long()
+        values = face_normals[:, None, :].expand(-1, 3, -1).reshape(-1, 3)
+        vertex_normals.index_add_(0, indices.reshape(-1), values)
+        return F.normalize(vertex_normals, dim=-1).contiguous()
 
     def load_mesh(
         self,
@@ -407,7 +541,7 @@ class MeshRender():
             self.device = requested_device
         else:
             self.raster_mode = 'torch'
-            self.device = torch.device('cpu')
+            self.device = requested_device if torch_device_available(requested_device) else torch.device('cpu')
 
         for attr_name in dir(self):
             attr_value = getattr(self, attr_name)
@@ -570,11 +704,7 @@ class MeshRender():
                         dim=-1),
             dim=-1)
 
-        vertex_normals = trimesh.geometry.mean_vertex_normals(vertex_count=self.vtx_pos.shape[0],
-                                                              faces=self.pos_idx.cpu(),
-                                                              face_normals=face_normals.cpu(), )
-        vertex_normals = torch.from_numpy(
-            vertex_normals).float().to(self.device).contiguous()
+        vertex_normals = self._mean_vertex_normals(face_normals)
 
         # Interpolate normal values across the rasterized pixels
         normal, _ = self.raster_interpolate(
@@ -796,11 +926,7 @@ class MeshRender():
                 v2 - v0,
                 dim=-1),
             dim=-1)
-        vertex_normals = trimesh.geometry.mean_vertex_normals(vertex_count=self.vtx_pos.shape[0],
-                                                              faces=self.pos_idx.cpu(),
-                                                              face_normals=face_normals.cpu(), )
-        vertex_normals = torch.from_numpy(
-            vertex_normals).float().to(self.device).contiguous()
+        vertex_normals = self._mean_vertex_normals(face_normals)
         tex_depth = pos_camera[:, 2].reshape(1, -1, 1).contiguous()
         rast_out, rast_out_db = self.raster_rasterize(
             pos_clip, self.pos_idx, resolution=resolution)
