@@ -29,11 +29,13 @@ import numpy as np
 import torch
 from diffusers import DiffusionPipeline
 from diffusers import EulerAncestralDiscreteScheduler
+from ...device_utils import make_generator, select_dtype
 
 
 class Multiview_Diffusion_Net():
     def __init__(self, config) -> None:
         self.device = config.device
+        self.dtype = getattr(config, "dtype", select_dtype(self.device))
         self.view_size = 512
         multiview_ckpt_path = config.multiview_ckpt_path
 
@@ -42,7 +44,7 @@ class Multiview_Diffusion_Net():
 
         pipeline = DiffusionPipeline.from_pretrained(
             multiview_ckpt_path,
-            custom_pipeline=custom_pipeline_path, torch_dtype=torch.float16)
+            custom_pipeline=custom_pipeline_path, torch_dtype=self.dtype)
 
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config,
                                                                          timestep_spacing='trailing')
@@ -66,7 +68,7 @@ class Multiview_Diffusion_Net():
             if control_images[i].mode == 'L':
                 control_images[i] = control_images[i].point(lambda x: 255 if x > 1 else 0, mode='1')
 
-        kwargs = dict(generator=torch.Generator(device=self.pipeline.device).manual_seed(0))
+        kwargs = dict(generator=make_generator(self.pipeline.device, 0))
 
         num_view = len(control_images) // 2
         normal_image = [[control_images[i] for i in range(num_view)]]

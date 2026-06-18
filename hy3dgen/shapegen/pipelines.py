@@ -42,6 +42,7 @@ from accelerate.utils import set_module_tensor_to_device
 
 from comfy.utils import ProgressBar, load_torch_file
 import comfy.model_management as mm
+from ..device_utils import as_torch_device
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ class Hunyuan3DDiTPipeline:
     def from_single_file(
         cls,
         ckpt_path,
-        device='cuda',
+        device=None,
         offload_device=torch.device('cpu'),
         dtype=torch.float16,
         use_safetensors=None,
@@ -160,6 +161,8 @@ class Hunyuan3DDiTPipeline:
         scheduler="FlowMatchEulerDiscreteScheduler", 
         **kwargs,
     ):
+        device = as_torch_device(device or mm.get_torch_device())
+        offload_device = as_torch_device(offload_device)
         new_sd = {}
         sd = load_torch_file(ckpt_path)
         if ckpt_path.endswith('.safetensors'):
@@ -252,7 +255,7 @@ class Hunyuan3DDiTPipeline:
         scheduler,
         conditioner,
         image_processor,
-        device=torch.device('cuda'),
+        device=None,
         offload_device=torch.device('cpu'),
         dtype=torch.float16,
         **kwargs
@@ -263,8 +266,8 @@ class Hunyuan3DDiTPipeline:
         self.conditioner = conditioner
         self.image_processor = image_processor
 
-        self.main_device = device
-        self.offload_device = offload_device
+        self.main_device = as_torch_device(device or mm.get_torch_device())
+        self.offload_device = as_torch_device(offload_device)
 
         self.to(offload_device, dtype)
 

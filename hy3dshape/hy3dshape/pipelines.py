@@ -144,11 +144,12 @@ class Hunyuan3DDiTPipeline:
         cls,
         ckpt_path,
         config_path,
-        device='cuda',
+        device=None,
         dtype=torch.float16,
         use_safetensors=None,
         **kwargs,
     ):
+        device = torch.device(device or mm.get_torch_device())
         # load config
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -205,13 +206,14 @@ class Hunyuan3DDiTPipeline:
     def from_pretrained(
         cls,
         model_path,
-        device='cuda',
+        device=None,
         dtype=torch.float16,
         use_safetensors=False,
         variant='fp16',
         subfolder='hunyuan3d-dit-v2-1',
         **kwargs,
     ):
+        device = torch.device(device or mm.get_torch_device())
         kwargs['from_pretrained_kwargs'] = dict(
             model_path=model_path,
             subfolder=subfolder,
@@ -242,7 +244,7 @@ class Hunyuan3DDiTPipeline:
         scheduler,
         conditioner,
         image_processor,
-        device='cuda',
+        device=None,
         dtype=torch.float16,
         **kwargs
     ):
@@ -252,7 +254,7 @@ class Hunyuan3DDiTPipeline:
         self.conditioner = conditioner
         self.image_processor = image_processor
         self.kwargs = kwargs
-        self.to(device, dtype)
+        self.to(torch.device(device or mm.get_torch_device()), dtype)
 
     def compile(self):
         self.vae = torch.compile(self.vae)

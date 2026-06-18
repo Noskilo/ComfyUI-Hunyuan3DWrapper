@@ -29,6 +29,7 @@ import random
 import numpy as np
 import torch
 from diffusers import AutoPipelineForText2Image
+from .device_utils import make_generator, select_dtype
 
 
 def seed_everything(seed):
@@ -44,13 +45,19 @@ class HunyuanDiTPipeline:
         model_path="Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled",
         device='cuda'
     ):
-        self.device = device
+        if device == 'cuda' and not torch.cuda.is_available():
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                device = 'xpu'
+            else:
+                device = 'cpu'
+        self.device = torch.device(device)
+        self.dtype = select_dtype(self.device)
         self.pipe = AutoPipelineForText2Image.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,
+            torch_dtype=self.dtype,
             enable_pag=True,
             pag_applied_layers=["blocks.(16|17|18|19)"]
-        ).to(device)
+        ).to(self.device)
         self.pos_txt = ",白色背景,3D风格,最佳质量"
         self.neg_txt = "文本,特写,裁剪,出框,最差质量,低质量,JPEG伪影,PGLY,重复,病态," \
                        "残缺,多余的手指,变异的手,画得不好的手,画得不好的脸,变异,畸形,模糊,脱水,糟糕的解剖学," \
@@ -62,7 +69,7 @@ class HunyuanDiTPipeline:
         torch.set_float32_matmul_precision('high')
         self.pipe.transformer = torch.compile(self.pipe.transformer, fullgraph=True)
         # self.pipe.vae.decode = torch.compile(self.pipe.vae.decode, fullgraph=True)
-        generator = torch.Generator(device=self.pipe.device)  # infer once for hot-start
+        generator = make_generator(self.pipe.device, 0)  # infer once for hot-start
         out_img = self.pipe(
             prompt='美少女战士',
             negative_prompt='模糊',
@@ -77,8 +84,7 @@ class HunyuanDiTPipeline:
     @torch.no_grad()
     def __call__(self, prompt, seed=0):
         seed_everything(seed)
-        generator = torch.Generator(device=self.pipe.device)
-        generator = generator.manual_seed(int(seed))
+        generator = make_generator(self.pipe.device, seed)
         out_img = self.pipe(
             prompt=prompt[:60] + self.pos_txt,
             negative_prompt=self.neg_txt,
